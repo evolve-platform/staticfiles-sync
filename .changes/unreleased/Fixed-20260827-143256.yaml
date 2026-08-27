@@ -1,0 +1,3 @@
+kind: Fixed
+body: GCS lock file check no longer fails when the lock is absent, which is the case it exists to detect
+time: 2026-08-27T14:32:56.000000+02:00
