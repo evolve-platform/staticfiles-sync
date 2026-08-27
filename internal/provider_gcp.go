@@ -3,6 +3,7 @@ package internal
 import (
 	"cloud.google.com/go/storage"
 	"context"
+	"errors"
 	"io"
 )
 
@@ -42,9 +43,14 @@ func (c *GCSClient) UploadFile(ctx context.Context, file io.Reader, remotePath s
 
 // FileExists in GCS
 func (c *GCSClient) FileExists(ctx context.Context, remotePath string) (bool, error) {
+	// Attrs wraps the 404 rather than returning ErrObjectNotExist itself, so a
+	// value comparison reports a missing object as a hard failure.
 	_, err := c.client.Bucket(c.bucket).Object(remotePath).Attrs(ctx)
-	if err == storage.ErrObjectNotExist {
+	if errors.Is(err, storage.ErrObjectNotExist) {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
