@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # goreleaser publishes the GitHub release
+    outputs:
+      tag: ${{ steps.latest.outputs.output }}
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,3 +48,85 @@ jobs:
         with:
           name: staticfiles-sync
           path: dist/*
+
+  # Scan the released binary, not go.mod: buildinfo lists only the modules that
+  # are linked in, so test and tool deps stay out. No checkout, no DT secret.
+  sbom:
+    needs: goreleaser
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the SBOM to the release
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: staticfiles-sync
+          path: dist
+
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        id: syft
+
+      # SPDX for the release page, CycloneDX 1.6 for DependencyTrack.
+      - name: Generate SBOM
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          SYFT_FILE_METADATA_SELECTION: none
+          TAG: ${{ needs.goreleaser.outputs.tag }}
+        run: |
+          set -euo pipefail
+          BIN=$(find dist -type f -path '*linux_amd64*' -name 'staticfiles-sync_v*' | head -n 1)
+          if [ -z "${BIN}" ]; then
+            echo "::error::linux_amd64 binary not found in dist"
+            exit 1
+          fi
+          "$SYFT" "file:${BIN}" \
+            --source-name staticfiles-sync \
+            --source-version "$TAG" \
+            -o spdx-json=staticfiles-sync.spdx.json \
+            -o cyclonedx-json@1.6=staticfiles-sync.cdx.json
+
+      - name: Attach SBOM to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.goreleaser.outputs.tag }}
+        run: gh release upload "$TAG" staticfiles-sync.spdx.json staticfiles-sync.cdx.json --clobber --repo "$GITHUB_REPOSITORY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-cyclonedx
+          path: staticfiles-sync.cdx.json
+          retention-days: 7
+
+  # Separate job so the DT key is never present while other repo code runs.
+  dependencytrack:
+    needs: [goreleaser, sbom]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sbom-cyclonedx
+
+      # Each release becomes a version under the "oss/go/staticfiles-sync"
+      # library container (OSS > OSS Go), which rolls up the latest version.
+      - name: Upload SBOM to DependencyTrack
+        env:
+          DT_API_KEY: ${{ secrets.DEPENDENCYTRACK_OSS_APIKEY }}
+          DT_URL: https://dependencytrack-api.labdigital.nl:8443
+          PROJECT: oss/go/staticfiles-sync
+          TAG: ${{ needs.goreleaser.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DT_API_KEY}" ]; then
+            echo "::error::DEPENDENCYTRACK_OSS_APIKEY is not available to this repo"
+            exit 1
+          fi
+          curl -sS --fail-with-body -X POST "${DT_URL}/api/v1/bom" \
+            -H "X-Api-Key: ${DT_API_KEY}" \
+            -F "autoCreate=true" \
+            -F "projectName=${PROJECT}" \
+            -F "projectVersion=${TAG}" \
+            -F "parentName=${PROJECT}" \
+            -F "isLatest=true" \
+            -F "bom=@staticfiles-sync.cdx.json"
