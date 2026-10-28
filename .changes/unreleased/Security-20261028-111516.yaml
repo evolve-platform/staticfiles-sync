@@ -1,0 +1,3 @@
+kind: Security
+body: Update all dependencies, fixing reachable x/net (http2) and grpc vulnerabilities
+time: 2026-10-28T11:15:16.903583+01:00
